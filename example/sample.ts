@@ -1,4 +1,10 @@
 import {
+  FilesetResolver,
+  ImageEmbedder,
+  ImageSegmenter,
+  ImageSegmenterResult,
+} from '@mediapipe/tasks-vision';
+import {
   ConnectionQuality,
   ConnectionState,
   DisconnectReason,
@@ -31,8 +37,8 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const state = {
   defaultDevices: new Map<MediaDeviceKind, string>(),
   bitrateInterval: undefined as any,
-  blur: BackgroundBlur(10, { delegate: 'GPU' }),
-  virtualBackground: VirtualBackground('/samantha-gades-BlIhVfXbi9s-unsplash.jpg'),
+  // blur: BackgroundBlur(10, { delegate: 'GPU' }),
+  // virtualBackground: VirtualBackground('/samantha-gades-BlIhVfXbi9s-unsplash.jpg'),
 };
 let currentRoom: Room | undefined;
 
@@ -48,6 +54,57 @@ function updateSearchParams(url: string, token: string) {
   const params = new URLSearchParams({ url, token });
   window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
 }
+
+const legendColors = [
+  [255, 197, 0, 255], // Vivid Yellow
+  [128, 62, 117, 255], // Strong Purple
+  [255, 104, 0, 255], // Vivid Orange
+  [166, 189, 215, 255], // Very Light Blue
+  [193, 0, 32, 255], // Vivid Red
+  [206, 162, 98, 255], // Grayish Yellow
+  [129, 112, 102, 255], // Medium Gray
+  [0, 125, 52, 255], // Vivid Green
+  [246, 118, 142, 255], // Strong Purplish Pink
+  [0, 83, 138, 255], // Strong Blue
+  [255, 112, 92, 255], // Strong Yellowish Pink
+  [83, 55, 112, 255], // Strong Violet
+  [255, 142, 0, 255], // Vivid Orange Yellow
+  [179, 40, 81, 255], // Strong Purplish Red
+  [244, 200, 0, 255], // Vivid Greenish Yellow
+  [127, 24, 13, 255], // Strong Reddish Brown
+  [147, 170, 0, 255], // Vivid Yellowish Green
+  [89, 51, 21, 255], // Deep Yellowish Brown
+  [241, 58, 19, 255], // Vivid Reddish Orange
+  [35, 44, 22, 255], // Dark Olive Green
+  [0, 161, 194, 255], // Vivid Blue
+];
+
+let videoElement: HTMLVideoElement;
+let ctx: CanvasRenderingContext2D;
+
+let segmentationMask: ImageData;
+let segmentationMaskCanvas: HTMLCanvasElement;
+let segmentationMaskCanvasCtx: CanvasRenderingContext2D;
+
+let imageSegmenter: ImageSegmenter;
+
+const initSegmenter = async () => {
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/wasm',
+  );
+  imageSegmenter = await ImageSegmenter.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite',
+      delegate: 'CPU', // Use CPU for Firefox.
+    },
+    runningMode: 'VIDEO',
+    outputCategoryMask: true,
+    outputConfidenceMasks: false,
+  });
+  // console.log("support", imageSegmenter.getSupportedProcessingUnits());
+  return imageSegmenter;
+};
 
 // handles actions from the HTML
 const appActions = {
@@ -76,6 +133,126 @@ const appActions = {
     await appActions.connectToRoom(url, token, roomOpts, connectOpts, true);
 
     state.bitrateInterval = setInterval(renderBitrate, 1000);
+  },
+
+  startVideo: async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    videoElement = document.querySelector('#stream-video') as HTMLVideoElement;
+    videoElement.srcObject = stream;
+    appActions.startSegmentation();
+  },
+
+  startSegmentation: async () => {
+    if (!imageSegmenter) {
+      try {
+        await initSegmenter();
+      } catch (e) {
+        console.error('ERROR', e);
+      }
+    }
+
+    const canvas = document.querySelector('#stream-canvas') as HTMLCanvasElement;
+    ctx = canvas.getContext('2d')!;
+    videoElement = document.querySelector('#stream-video') as HTMLVideoElement;
+
+    segmentationMask = new ImageData(videoElement.videoWidth, videoElement.videoHeight);
+    segmentationMaskCanvas = document.createElement('canvas');
+    segmentationMaskCanvas.width = videoElement.videoWidth;
+    segmentationMaskCanvas.height = videoElement.videoHeight;
+    segmentationMaskCanvasCtx = segmentationMaskCanvas.getContext('2d')!;
+
+    appActions.segment();
+  },
+
+  segment: () => {
+    const startTimeMs = performance.now();
+
+    imageSegmenter.segmentForVideo(videoElement, startTimeMs, (result: ImageSegmenterResult) => {
+      const mask: number[] = result.categoryMask!.getAsFloat32Array();
+
+      // TODO: Optimize ?
+      for (let i = 0; i < mask.length; ++i) {
+        // segmentationMask.data[i * 4 + 3] = 255 * mask[i];
+        // TODO: Maybe use some internal mecanism of media pipe
+        segmentationMask.data[i * 4 + 3] = mask[i] > 0 ? 255 : 0;
+        // segmentationMask.data[i * 4 + 2] = mask[i] > 0 ? 255 : 0;
+      }
+
+      console.log(segmentationMask);
+
+      segmentationMaskCanvasCtx.putImageData(segmentationMask, 0, 0);
+
+      ctx.globalCompositeOperation = 'copy';
+      ctx.filter = 'blur(8px)';
+
+      ctx.drawImage(
+        // @ts-ignore
+        segmentationMaskCanvas,
+        0,
+        0,
+        videoElement.videoWidth,
+        videoElement.videoHeight,
+        0,
+        0,
+        videoElement.videoWidth,
+        videoElement.videoHeight,
+      );
+
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.filter = 'none';
+      ctx.drawImage(videoElement, 0, 0);
+
+      // ctx.globalCompositeOperation = 'destination-over';
+      // ctx.filter = 'blur(16px)';
+      // ctx.drawImage(videoElement, 0, 0);
+
+      window.requestAnimationFrame(appActions.segment);
+    });
+  },
+
+  publishCanvas: async (room: Room) => {
+    console.log('----> publishCanvas');
+
+    appActions.startVideo();
+
+    const canvas = document.querySelector('#stream-canvas') as HTMLCanvasElement;
+
+    // ctx.fillStyle = 'blue';
+
+    // // Define the square's initial position and speed
+    // let x = 10;
+    // let speed = 2;
+
+    // const draw = () => {
+    //   ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear the canvas
+    //   // Move the circle back and forth
+    //   if (x + 50 > canvas.width || x < 10) {
+    //     speed = -speed; // Change direction
+    //   }
+    //   x += speed;
+
+    //   ctx.beginPath(); // Start a new path
+    //   ctx.arc(x, 150, 25, 0, 2 * Math.PI); // Draw the circle at the new position
+    //   ctx.fillStyle = 'blue'; // Set the fill color
+    //   ctx.fill(); // Fill the circle
+    // };
+
+    // setInterval(draw, 1000 / 30);
+
+    const stream = canvas.captureStream();
+    console.log('stream', stream);
+    const tracks = stream.getVideoTracks();
+    console.log('tracks', tracks);
+    const canvasTrack = tracks[0];
+
+    console.log('participant', room.localParticipant);
+    const pub = await room.localParticipant.publishTrack(canvasTrack, {
+      name: 'mytrack',
+      simulcast: true,
+      // if this should be treated like a camera feed, tag it as such
+      // supported known sources are .Camera, .Microphone, .ScreenShare
+      source: Track.Source.Camera,
+    });
   },
 
   connectToRoom: async (
@@ -155,9 +332,10 @@ const appActions = {
         // speed up publishing by starting to publish before it's fully connected
         // publishing is accepted as soon as signal connection has established
         if (shouldPublish) {
-          await room.localParticipant.enableCameraAndMicrophone();
+          // await room.localParticipant.enableCameraAndMicrophone();
           appendLog(`tracks published in ${Date.now() - startTime}ms`);
           updateButtonsForPublishState();
+          await appActions.publishCanvas(room);
         }
       });
 
@@ -211,7 +389,7 @@ const appActions = {
     } else {
       appendLog('enabling video');
     }
-    await currentRoom.localParticipant.setCameraEnabled(!enabled);
+    // await currentRoom.localParticipant.setCameraEnabled(!enabled);
 
     setButtonDisabled('toggle-video-button', false);
     renderParticipant(currentRoom.localParticipant);
@@ -406,6 +584,7 @@ function appendLog(...args: any[]) {
 
 // updates participant UI
 function renderParticipant(participant: Participant, remove: boolean = false) {
+  console.log('renderParticipant', participant);
   const container = $('participants-area');
   if (!container) return;
   const { identity } = participant;
